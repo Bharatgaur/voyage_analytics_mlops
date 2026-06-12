@@ -1,0 +1,154 @@
+# ============================================================
+# kubernetes/deployment.yaml
+# Kubernetes Deployment for Travel ML Flask API
+#
+# Apply:
+#   kubectl apply -f kubernetes/deployment.yaml
+#
+# Scale:
+#   kubectl scale deployment travel-ml-api --replicas=5
+# ============================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-ml-api
+  namespace: default
+  labels:
+    app: travel-ml-api
+    version: "1.0"
+    component: api
+spec:
+  # ── Replicas ────────────────────────────────────────────────
+  replicas: 3           # Start with 3 pods for high availability
+
+  # ── Rolling Update Strategy ─────────────────────────────────
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1       # Allow 1 extra pod during update
+      maxUnavailable: 0  # Never have 0 pods running
+
+  # ── Pod Selector ────────────────────────────────────────────
+  selector:
+    matchLabels:
+      app: travel-ml-api
+
+  # ── Pod Template ────────────────────────────────────────────
+  template:
+    metadata:
+      labels:
+        app: travel-ml-api
+        version: "1.0"
+    spec:
+      containers:
+        - name: travel-ml-api
+          image: travel-ml-project:latest   # Replace with your registry image
+          imagePullPolicy: IfNotPresent
+
+          # ── Environment Variables ─────────────────────────────
+          env:
+            - name: APP_MODE
+              value: "api"
+            - name: PORT
+              value: "5000"
+            - name: DEBUG
+              value: "false"
+
+          # ── Ports ─────────────────────────────────────────────
+          ports:
+            - containerPort: 5000
+              protocol: TCP
+
+          # ── Health Checks ──────────────────────────────────────
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 20
+            periodSeconds: 5
+
+          # ── Resource Limits ────────────────────────────────────
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu:    "250m"
+            limits:
+              memory: "1Gi"
+              cpu:    "1000m"
+
+          # ── Volume Mounts (for model files) ────────────────────
+          volumeMounts:
+            - name: models-volume
+              mountPath: /app/models
+              readOnly: true
+
+      # ── Volumes ───────────────────────────────────────────────
+      volumes:
+        - name: models-volume
+          # In production, use a PersistentVolumeClaim or ConfigMap
+          # For local testing, you can use hostPath
+          emptyDir: {}
+
+      # ── Restart Policy ────────────────────────────────────────
+      restartPolicy: Always
+
+---
+# ============================================================
+# Kubernetes Service — Exposes the API externally
+# ============================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: travel-ml-api-service
+  namespace: default
+  labels:
+    app: travel-ml-api
+spec:
+  type: LoadBalancer   # Use NodePort for local Minikube
+  selector:
+    app: travel-ml-api
+  ports:
+    - protocol: TCP
+      port: 80           # External port (users access this)
+      targetPort: 5000   # Internal container port
+
+---
+# ============================================================
+# Horizontal Pod Autoscaler — Auto-scale based on CPU load
+# ============================================================
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: travel-ml-api-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: travel-ml-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70   # Scale up when CPU > 70%
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80   # Scale up when memory > 80%
