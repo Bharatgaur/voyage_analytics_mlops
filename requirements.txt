@@ -1,0 +1,45 @@
+# =============================================
+# Travel ML Project - Requirements
+# =============================================
+
+# Core Data Science
+pandas==2.1.4
+numpy==1.26.2
+scikit-learn==1.3.2
+scipy==1.11.4
+
+# Gradient Boosting
+xgboost==2.0.3
+
+# Visualization
+matplotlib==3.8.2
+seaborn==0.13.0
+plotly==5.18.0
+
+# MLflow - Experiment Tracking
+mlflow==2.9.2
+
+# Flask - REST API
+flask==3.0.0
+flask-cors==4.0.0
+
+# Streamlit - Web App
+streamlit==1.29.0
+
+# Utilities
+joblib==1.3.2
+python-dotenv==1.0.0
+requests==2.31.0
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
+
+# Logging
+loguru==0.7.2
+
+# Data Validation
+pydantic==2.5.2
+
+# Gunicorn (Production WSGI)
+gunicorn==21.2.0
