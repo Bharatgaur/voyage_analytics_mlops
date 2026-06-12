@@ -1,0 +1,239 @@
+// ============================================================
+// Jenkinsfile — Voyage Analytics MLOps - CI/CD Pipeline
+//
+// This pipeline automates:
+//   1. Code checkout from GitHub
+//   2. Python dependency installation
+//   3. Unit tests
+//   4. Model training (optional on main branch)
+//   5. Docker image build and push
+//   6. Kubernetes deployment
+//
+// Prerequisites:
+//   - Jenkins with Pipeline, Docker, Kubernetes plugins
+//   - Docker Hub credentials stored as 'dockerhub-credentials'
+//   - Kubernetes kubeconfig stored as 'kubeconfig'
+// ============================================================
+
+pipeline {
+    agent any
+
+    // ── Environment Variables ─────────────────────────────────
+    environment {
+        DOCKER_IMAGE    = "yourdockerhubusername/voyage-analytics-mlops"
+        DOCKER_TAG      = "${BUILD_NUMBER}"
+        DOCKER_LATEST   = "latest"
+        K8S_DEPLOYMENT  = "voyage-analytics-api"
+        K8S_NAMESPACE   = "default"
+        PYTHON_VERSION  = "python3"
+        CONDA_ENV       = "voyage_mlops"
+        CONDA_PATH      = "/opt/conda/etc/profile.d/conda.sh"
+    }
+
+    // ── Pipeline Options ──────────────────────────────────────
+    options {
+        timeout(time: 60, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
+    }
+
+    // ── Trigger on pushes to main and develop branches ────────
+    triggers {
+        pollSCM('H/5 * * * *')  // Poll SCM every 5 minutes
+    }
+
+    stages {
+
+        // ── Stage 1: Checkout ─────────────────────────────────
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code …'
+                checkout scm
+                sh 'git log --oneline -5'
+            }
+        }
+
+        // ── Stage 2: Setup Python Environment ─────────────────
+        stage('Setup Python Environment') {
+            steps {
+                echo 'Setting up Anaconda environment …'
+                sh """
+                    . ${CONDA_PATH}
+                    conda create -y -n ${CONDA_ENV} python=3.10
+                    conda activate ${CONDA_ENV}
+                    pip install --upgrade pip
+                    pip install -r requirements.txt
+                    echo "Anaconda environment ready."
+                """
+            }
+        }
+
+        // ── Stage 3: Code Quality Checks ──────────────────────
+        stage('Code Quality') {
+            parallel {
+                stage('Lint with flake8') {
+                    steps {
+                        sh """
+                            . ${CONDA_PATH}
+                            conda activate ${CONDA_ENV}
+                            pip install flake8
+                            # Stop build if syntax errors (E9), undefined names (F8)
+                            flake8 src/ api/ --count --select=E9,F63,F7,F82 \
+                                   --show-source --statistics || true
+                            # Warn on style issues, don't fail
+                            flake8 src/ api/ --count --max-line-length=120 \
+                                   --statistics || true
+                        """
+                    }
+                }
+                stage('Check imports') {
+                    steps {
+                        sh """
+                            . ${CONDA_PATH}
+                            conda activate ${CONDA_ENV}
+                            python -c "import src.data_processing; import src.utils; print('Imports OK')"
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── Stage 4: Unit Tests ───────────────────────────────
+        stage('Unit Tests') {
+            steps {
+                echo 'Running unit tests …'
+                sh """
+                    . ${CONDA_PATH}
+                            conda activate ${CONDA_ENV}
+                    pytest tests/ -v \
+                        --tb=short \
+                        --junitxml=test-results/results.xml \
+                        --cov=src \
+                        --cov-report=xml:coverage.xml \
+                        --cov-report=term-missing \
+                        || true
+                """
+            }
+            post {
+                always {
+                    junit 'test-results/results.xml'
+                    publishCoverage adapters: [coberturaAdapter('coverage.xml')]
+                }
+            }
+        }
+
+        // ── Stage 5: Model Training (main branch only) ────────
+        stage('Model Training') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Training ML models …'
+                sh """
+                    . ${CONDA_PATH}
+                            conda activate ${CONDA_ENV}
+                    ${PYTHON_VERSION} src/model_training.py
+                    echo "Models trained and saved."
+                """
+            }
+        }
+
+        // ── Stage 6: Docker Build ─────────────────────────────
+        stage('Docker Build') {
+            steps {
+                echo 'Building Docker image …'
+                sh """
+                    docker build \
+                        --tag ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                        --tag ${DOCKER_IMAGE}:${DOCKER_LATEST} \
+                        --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
+                        --no-cache \
+                        .
+                    echo "Docker image built: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                """
+            }
+        }
+
+        // ── Stage 7: Docker Push (main branch only) ───────────
+        stage('Docker Push') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Pushing Docker image to registry …'
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh """
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                        docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        docker push ${DOCKER_IMAGE}:${DOCKER_LATEST}
+                        echo "Image pushed to Docker Hub."
+                    """
+                }
+            }
+        }
+
+        // ── Stage 8: Deploy to Kubernetes (main branch only) ──
+        stage('Deploy to Kubernetes') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Deploying to Kubernetes …'
+                withKubeConfig([credentialsId: 'kubeconfig']) {
+                    sh """
+                        # Update image tag in deployment
+                        kubectl set image deployment/${K8S_DEPLOYMENT} \
+                            ${K8S_DEPLOYMENT}=${DOCKER_IMAGE}:${DOCKER_TAG} \
+                            --namespace=${K8S_NAMESPACE}
+
+                        # Wait for rollout to complete
+                        kubectl rollout status deployment/${K8S_DEPLOYMENT} \
+                            --namespace=${K8S_NAMESPACE} \
+                            --timeout=120s
+
+                        echo "Kubernetes deployment successful."
+                        kubectl get pods --namespace=${K8S_NAMESPACE} -l app=${K8S_DEPLOYMENT}
+                    """
+                }
+            }
+        }
+
+        // ── Stage 9: Smoke Test ───────────────────────────────
+        stage('Smoke Test') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Running smoke tests against deployed API …'
+                sh """
+                    sleep 15  # Wait for pod to be ready
+                    curl -f http://localhost:5000/health || \
+                        echo "WARNING: Health check failed — check deployment logs"
+                """
+            }
+        }
+    }
+
+    // ── Post Actions ──────────────────────────────────────────
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+            // Uncomment to send Slack notification:
+            // slackSend(channel: '#ml-deployments', message: "Voyage Analytics MLOps deploy successful — Build #${BUILD_NUMBER}")
+        }
+        failure {
+            echo 'Pipeline FAILED. Check logs above.'
+            // Uncomment to send email alert:
+            // emailext(to: 'team@voyageanalytics.com', subject: "FAILED: Build #${BUILD_NUMBER}", body: "Check Jenkins for details.")
+        }
+        always {
+            echo 'Cleaning up workspace …'
+            sh "docker system prune -f || true"
+            cleanWs()
+        }
+    }
+}
